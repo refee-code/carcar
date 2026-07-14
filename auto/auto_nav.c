@@ -241,6 +241,52 @@ static float route_dynamic_heading_deg(float segment_heading_deg,
                                     preview_delta_deg * blend);
 }
 
+static float auto_nav_dynamic_lookahead_cm(bool dynamic_route,
+                                           float turn_distance_cm,
+                                           float cross_track_cm)
+{
+    float lookahead_cm = AUTO_NAV_LOOKAHEAD_DISTANCE_CM;
+    float blend = 0.0f;
+    float abs_cte;
+
+    if (!dynamic_route) {
+        return lookahead_cm;
+    }
+
+    lookahead_cm = auto_clampf(lookahead_cm,
+                               AUTO_DYNAMIC_LOOKAHEAD_MIN_CM,
+                               AUTO_DYNAMIC_LOOKAHEAD_MAX_CM);
+
+    if (turn_distance_cm <= AUTO_DYNAMIC_LOOKAHEAD_TURN_START_CM) {
+        float turn_start_cm = AUTO_DYNAMIC_LOOKAHEAD_TURN_START_CM;
+        if (turn_start_cm < 1.0f) {
+            turn_start_cm = 1.0f;
+        }
+        blend = (turn_start_cm - turn_distance_cm) / turn_start_cm;
+        blend = auto_clampf(blend, 0.0f, 1.0f);
+    }
+
+    abs_cte = auto_absf(cross_track_cm);
+    if (abs_cte > AUTO_DYNAMIC_LOOKAHEAD_CTE_START_CM) {
+        float cte_range = AUTO_DYNAMIC_LOOKAHEAD_CTE_FULL_CM -
+                          AUTO_DYNAMIC_LOOKAHEAD_CTE_START_CM;
+        float cte_blend;
+        if (cte_range < 1.0f) {
+            cte_range = 1.0f;
+        }
+        cte_blend = (abs_cte - AUTO_DYNAMIC_LOOKAHEAD_CTE_START_CM) /
+                    cte_range;
+        cte_blend = auto_clampf(cte_blend, 0.0f, 1.0f);
+        if (cte_blend > blend) {
+            blend = cte_blend;
+        }
+    }
+
+    blend = blend * blend * (3.0f - 2.0f * blend);
+    return lookahead_cm -
+           (lookahead_cm - AUTO_DYNAMIC_LOOKAHEAD_MIN_CM) * blend;
+}
+
 static void route_segment_at_distance(const auto_route_t *route,
                                       float distance_cm,
                                       size_t *segment_index,
@@ -866,6 +912,7 @@ auto_status_t auto_nav_follow(auto_nav_t *nav,
     float travelled_cm;
     float segment_heading_deg;
     float turn_distance_cm;
+    float nav_lookahead_cm;
     size_t segment_index;
     bool driving_reverse;
     bool dynamic_route;
@@ -890,6 +937,11 @@ auto_status_t auto_nav_follow(auto_nav_t *nav,
         travelled_cm + AUTO_ROUTE_DONE_MARGIN_CM >= route_length_cm) {
         terminal_zone = true;
     }
+    cte       = 0.0f;
+    cte_steer = 0.0f;
+    steer_feedforward = 0.0f;
+    dynamic_drive_heading_deg = 0.0f;
+    nav_lookahead_cm = AUTO_NAV_LOOKAHEAD_DISTANCE_CM;
 
     /* ── 路径点推进（每帧最多推进一次，避免while循环导致越级） ──────────────
      * 推进条件（满足其一）：
@@ -923,8 +975,6 @@ auto_status_t auto_nav_follow(auto_nav_t *nav,
     nav->prev_driving_reverse = driving_reverse;
 
     /* ── 前视点（沿路径积累160cm）────────────────────────────────────────── */
-    nav->target_index = find_lookahead_index(route, nav->nearest_index,
-                                              AUTO_NAV_LOOKAHEAD_DISTANCE_CM);
     if (!dynamic_route) {
         if (nav->nearest_index + 1u < route->count) {
             segment_index = nav->nearest_index;
@@ -946,17 +996,30 @@ auto_status_t auto_nav_follow(auto_nav_t *nav,
         segment_end_wp = &route->points[segment_index + 1u];
         route_project_pose(route, segment_index, pose, &segment_t);
     }
-    route_point_ahead(route,
-                      segment_index,
-                      segment_t,
-                      AUTO_NAV_LOOKAHEAD_DISTANCE_CM,
-                      &target_x_cm,
-                      &target_y_cm);
     segment_heading_deg = route_segment_heading_deg(route, segment_index);
     turn_distance_cm = route_distance_to_next_turn_cm(route,
                                                       segment_index,
                                                       segment_t,
                                                       segment_heading_deg);
+    if (AUTO_CROSS_TRACK_KP > 0.0f) {
+        cte = cross_track_error(segment_start_wp->x_cm,
+                                segment_start_wp->y_cm,
+                                segment_end_wp->x_cm,
+                                segment_end_wp->y_cm,
+                                pose->x_cm,
+                                pose->y_cm);
+    }
+    nav_lookahead_cm = auto_nav_dynamic_lookahead_cm(dynamic_route,
+                                                     turn_distance_cm,
+                                                     cte);
+    nav->target_index = find_lookahead_index(route, nav->nearest_index,
+                                              nav_lookahead_cm);
+    route_point_ahead(route,
+                      segment_index,
+                      segment_t,
+                      nav_lookahead_cm,
+                      &target_x_cm,
+                      &target_y_cm);
     ref_x_cm = segment_start_wp->x_cm +
                (segment_end_wp->x_cm - segment_start_wp->x_cm) * segment_t;
     ref_y_cm = segment_start_wp->y_cm +
@@ -976,10 +1039,6 @@ auto_status_t auto_nav_follow(auto_nav_t *nav,
 
     /* ── 横向误差纠偏（叠加到转向，使车辆贴回路径段） ─────────────────────
      * 使用当前路径段（nearest_index-1 → nearest_index）计算横向偏差。   */
-    cte       = 0.0f;
-    cte_steer = 0.0f;
-    steer_feedforward = 0.0f;
-    dynamic_drive_heading_deg = 0.0f;
     if (dynamic_route) {
         have_dynamic_drive_heading =
             route_dynamic_drive_heading_ahead_deg(route,

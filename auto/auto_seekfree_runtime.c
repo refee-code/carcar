@@ -50,7 +50,7 @@ static float s_subject3_trace_last_x_cm = 0.0f;
 static float s_subject3_trace_last_y_cm = 0.0f;
 
 #define AUTO_SUBJECT3_DRIVE_DEAD_ZONE       (300)
-#define AUTO_SUBJECT3_REMOTE_DRIVE_PWM_MAX  (1600)
+#define AUTO_SUBJECT3_REMOTE_DRIVE_PWM_MAX  (2700)
 #define AUTO_SUBJECT3_DRIVE_PWM_MIN         (700)
 #define AUTO_SUBJECT3_DRIVE_PWM_STEP        (400)
 #define AUTO_SUBJECT3_DRIVE_SPEED_MAX_CM_S  (220.0f)
